@@ -1,0 +1,92 @@
+const express = require('express');
+const cors = require('cors');
+const dotenv = require('dotenv');
+const connectDB = require('./config/db');
+const { notFound, errorHandler } = require('./middleware/errorHandler');
+const { ensureSuperAdmin } = require('./controllers/authController');
+
+// Load environment variables
+dotenv.config();
+
+// Connect to MongoDB, THEN seed the super admin - not in parallel. connectDB()
+// never rejects (it catches its own errors so /health can still report status
+// if the DB is down), so this always runs, but only after the connection has
+// genuinely either succeeded or failed - never while it's still pending.
+// Getting this order wrong was a real bug: ensureSuperAdmin() checked
+// isDbConnected() before mongoose had finished connecting, saw "not
+// connected" every time, and silently seeded the super admin into the
+// in-memory store instead of MongoDB even when a real MONGODB_URI was set
+// and the connection succeeded moments later.
+connectDB().then(() => {
+  ensureSuperAdmin().catch((err) => console.error('[Auth] Failed to seed super admin:', err.message));
+});
+
+const app = express();
+
+const path = require('path');
+
+// Which websites may call this API. Only the live production demo-site
+// domains in config/productionSites.js (plus anything added via
+// ALLOWED_ORIGINS) may submit form/session data - local dev copies of those
+// demo sites are deliberately NOT allowed, so no test data from a
+// developer's machine can land in production. localhost:5174 is the one
+// exception: that's the dashboard itself, the admin tool used to manage
+// this data, not a form-submitting site, so it stays allowed regardless of
+// where it's run from.
+const { PRODUCTION_SITES } = require('./config/productionSites');
+const DASHBOARD_ORIGIN = 'http://localhost:5174';
+const DEFAULT_PRODUCTION_ORIGINS = [
+  ...PRODUCTION_SITES.flatMap((site) => [site, site.replace('https://', 'https://www.')]),
+  DASHBOARD_ORIGIN,
+];
+const EXTRA_ORIGINS = [
+  ...DEFAULT_PRODUCTION_ORIGINS,
+  ...(process.env.ALLOWED_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean),
+];
+
+// Middleware
+app.use(cors({
+  origin(origin, callback) {
+    // No Origin header (server-to-server calls, curl, Postman) is always allowed.
+    if (!origin || EXTRA_ORIGINS.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`Not allowed by CORS: ${origin}`));
+    }
+  },
+  credentials: true,
+}));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+
+// Health Check Route
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'online',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+  });
+});
+
+// API Routes
+app.use('/api/auth', require('./routes/authRoutes'));
+app.use('/api/credentials', require('./routes/credentialRoutes'));
+app.use('/api/sessions', require('./routes/sessionRoutes'));
+app.use('/api/uploads', require('./routes/uploadRoutes'));
+
+// 404 & Error Handling Middleware
+app.use(notFound);
+app.use(errorHandler);
+
+const PORT = process.env.PORT || 5000;
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`=================================`);
+  console.log(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+  console.log(`API Health: http://localhost:${PORT}/health`);
+  console.log(`Credentials API: http://localhost:${PORT}/api/credentials`);
+  console.log(`Sessions API: http://localhost:${PORT}/api/sessions`);
+  console.log(`=================================`);
+});

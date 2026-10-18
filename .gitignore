@@ -1,0 +1,8 @@
+node_modules/
+.env
+.DS_Store
+*.log
+
+# Local MongoDB data files (real mongod running for local dev/testing) -
+# machine-specific database contents, never committed.
+data/db/
